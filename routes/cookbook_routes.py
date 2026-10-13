@@ -478,6 +478,19 @@ def setup_cookbook_routes() -> APIRouter:
         tail = text[-6000:]
         patterns = [
             (
+                r"Free memory on device.*less than desired GPU memory utilization|less than desired GPU memory utilization",
+                "Not enough free GPU memory at startup. On a unified-memory GPU (GB10 / DGX Spark) the Linux page cache "
+                "counts against CUDA free memory, so dropping it can free many GiB.",
+                [
+                    {
+                        "label": "drop the Linux page cache, then relaunch (GB10: page cache counts against CUDA free memory)",
+                        "op": "manual",
+                        "command": "sync; echo 3 | sudo tee /proc/sys/vm/drop_caches",
+                    },
+                    {"label": "retry with GPU memory utilization 0.60", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.60"},
+                ],
+            ),
+            (
                 r"No available memory for the cache blocks|Available KV cache memory:.*-",
                 "No GPU memory left for KV cache after loading model.",
                 [
@@ -3147,6 +3160,39 @@ def setup_cookbook_routes() -> APIRouter:
                 gpus[0]["busy"] = True
         return gpus
 
+    def _is_number(text: str) -> bool:
+        try:
+            float(text)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    async def _probe_proc_meminfo(host: str | None, ssh_port: str | None) -> dict | None:
+        """MemTotal / MemFree / page cache in MB from /proc/meminfo (Linux only).
+
+        MemFree (not MemAvailable) is used for `free_mb`: on unified-memory
+        NVIDIA parts the page cache is NOT available to CUDA, so MemAvailable
+        would over-promise and vLLM's startup free-memory check would still fail.
+        """
+        out, err = await _run_gpu_shell(
+            "grep -E '^(MemTotal|MemFree|Buffers|Cached):' /proc/meminfo 2>/dev/null",
+            host, ssh_port, timeout=4,
+        )
+        if err is not None or not out:
+            return None
+        kb: dict[str, int] = {}
+        for ln in out.splitlines():
+            m = re.match(r"^(\w+):\s+(\d+)\s*kB", ln.strip())
+            if m:
+                kb[m.group(1)] = int(m.group(2))
+        if not kb.get("MemTotal"):
+            return None
+        return {
+            "total_mb": kb["MemTotal"] // 1024,
+            "free_mb": kb.get("MemFree", 0) // 1024,
+            "cache_mb": (kb.get("Cached", 0) + kb.get("Buffers", 0)) // 1024,
+        }
+
     async def _probe_apple_unified_memory(host: str | None, ssh_port: str | None) -> dict | None:
         """Best-effort Apple Silicon unified-memory probe, local or over SSH."""
         cmd = (
@@ -3238,6 +3284,7 @@ def setup_cookbook_routes() -> APIRouter:
 
         gpus = []
         uuid_to_idx: dict[str, int] = {}
+        meminfo: dict | None = None
         for line in (gpu_out or "").strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 7:
@@ -3245,21 +3292,45 @@ def setup_cookbook_routes() -> APIRouter:
             try:
                 idx = int(parts[0])
                 name = parts[1]
-                free_mb = int(float(parts[2]))
-                total_mb = int(float(parts[3]))
-                used_mb = int(float(parts[4]))
-                util_pct = int(float(parts[5]))
+                util_pct = int(float(parts[5])) if _is_number(parts[5]) else 0
                 gpu_uuid = parts[6]
             except (ValueError, IndexError):
                 continue
+            unified = False
+            if all(_is_number(parts[i]) for i in (2, 3, 4)):
+                free_mb = int(float(parts[2]))
+                total_mb = int(float(parts[3]))
+                used_mb = int(float(parts[4]))
+            else:
+                # Unified-memory NVIDIA (GB10 / DGX Spark): nvidia-smi reports
+                # memory as [N/A] because the GPU shares system RAM. Fall back to
+                # /proc/meminfo so the Cookbook still gets live free memory.
+                if meminfo is None:
+                    meminfo = await _probe_proc_meminfo(host, ssh_port) or {}
+                if not meminfo:
+                    continue
+                unified = True
+                total_mb = meminfo["total_mb"]
+                free_mb = meminfo["free_mb"]
+                used_mb = max(0, total_mb - free_mb)
             busy = total_mb > 0 and (free_mb / total_mb) < 0.5
             uuid_to_idx[gpu_uuid] = idx
-            gpus.append({
+            entry = {
                 "index": idx, "name": name, "uuid": gpu_uuid,
                 "free_mb": free_mb, "total_mb": total_mb,
                 "used_mb": used_mb, "util_pct": util_pct,
                 "busy": busy, "processes": [],
-            })
+            }
+            if unified:
+                entry.update({
+                    "unified_memory": True,
+                    "backend": "cuda",
+                    "source": "nvidia-smi+meminfo",
+                    # Page cache counts against CUDA free memory on GB10;
+                    # dropping it returns this much to the free pool.
+                    "reclaimable_cache_mb": meminfo["cache_mb"],
+                })
+            gpus.append(entry)
 
         # Best-effort process listing — skip silently if it fails
         proc_query = "nvidia-smi --query-compute-apps=pid,gpu_uuid,process_name,used_memory --format=csv,noheader,nounits"
@@ -3274,7 +3345,7 @@ def setup_cookbook_routes() -> APIRouter:
                     try:
                         pid = int(parts[0])
                         pname = parts[2]
-                        pmem = int(float(parts[3]))
+                        pmem = int(float(parts[3])) if _is_number(parts[3]) else 0
                     except (ValueError, IndexError):
                         continue
                     idx = uuid_to_idx.get(parts[1])

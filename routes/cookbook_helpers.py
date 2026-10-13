@@ -1265,6 +1265,19 @@ def _diagnose_serve_output(text: str) -> dict | None:
     tail = text[-6000:]
     patterns = [
         (
+            r"Free memory on device.*less than desired GPU memory utilization|less than desired GPU memory utilization",
+            "Not enough free GPU memory at startup. On a unified-memory GPU (GB10 / DGX Spark) the Linux page cache "
+            "counts against CUDA free memory, so dropping it can free many GiB.",
+            [
+                {
+                    "label": "drop the Linux page cache, then relaunch (GB10: page cache counts against CUDA free memory)",
+                    "op": "manual",
+                    "command": "sync; echo 3 | sudo tee /proc/sys/vm/drop_caches",
+                },
+                {"label": "retry with GPU memory utilization 0.60", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.60"},
+            ],
+        ),
+        (
             r"No available memory for the cache blocks|Available KV cache memory:.*-",
             "No GPU memory left for KV cache after loading model.",
             [

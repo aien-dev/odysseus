@@ -36,6 +36,8 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import spinnerModule from './spinner.js';
 import { _loadTasks, _tmuxGracefulKill, _nextAvailablePort, _taskPort } from './cookbookRunning.js';
 import { openCookbookDependencies } from './cookbook-diagnosis.js';
+import { isAppleTarget as _isAppleHardware } from './cookbookTargets.js';
+import { SPARK_DEFAULTS, isNvidiaUnifiedGpu, sparkGpuMemoryUtilization } from './cookbookSparkDefaults.js';
 
 // Map a serve-backend code (vllm / sglang / llamacpp / mlx) → the package name
 // the Dependencies API reports. Used to look up "is this backend installed
@@ -581,17 +583,10 @@ function _applyEngineFilter(models) {
   const platform = String(srv?.platform || _envState.platform || _hwfitCache?.system?.platform || '').toLowerCase();
   const backend = String(_hwfitCache?.system?.backend || '').toLowerCase();
   const gpuName = String(_hwfitCache?.system?.gpu_name || '').toLowerCase();
-  const isAppleTarget = !!(useCase === 'image_gen' && (
-    platform === 'darwin'
-    || platform === 'macos'
-    || platform.includes('mac')
-    || backend === 'metal'
-    || backend === 'mps'
-    || backend === 'apple'
-    || gpuName.includes('apple')
-    || _hwfitCache?.system?.unified_memory
-  ));
-	  if (isAppleTarget) {
+  // NOT keyed on the shared-memory flag: NVIDIA GB10 (DGX Spark) and AMD APUs
+  // set it too and must keep the full catalog.
+  const appleOnly = useCase === 'image_gen' && _isAppleHardware({ platform, backend, gpuName });
+	  if (appleOnly) {
 	    out = out.filter(m => {
 	      const text = `${m?.name || ''} ${m?.id || ''} ${m?.provider || ''}`.toLowerCase();
 	      return text.includes('mlx-community/') || text.includes('mlx-community') || m?.mlx_only || m?.apple_ok;
@@ -1942,7 +1937,7 @@ export function _expandModelRow(row, modelData) {
       else if (headroom < 8) maxCtx = Math.min(maxCtx, 8192);
       else if (headroom < 16) maxCtx = Math.min(maxCtx, 16384);
       // GPU mem utilization
-      const gpuUtil = modelVram / (tp * gpuMem) > 0.8 ? '0.95' : '0.90';
+      let gpuUtil = modelVram / (tp * gpuMem) > 0.8 ? '0.95' : '0.90';
       // Tool parser
       const parser = _detectToolParser(modelData.name);
 
@@ -1951,6 +1946,33 @@ export function _expandModelRow(row, modelData) {
       const port = _qrPort;
       const detected = _detectBackend(modelData);
       const runBackend = detected.backend || 'vllm';
+
+      // NVIDIA unified-memory (DGX Spark / GB10): vLLM refuses to start when
+      // another process holds memory and free < util * total. Size the fraction
+      // from the live free memory instead of a fixed 0.90/0.95 (Quick Run has no
+      // user-entered value, so this always applies here).
+      if ((runBackend === 'vllm' || runBackend === 'sglang') && isNvidiaUnifiedGpu(null, system)) {
+        try {
+          const gp = new URLSearchParams();
+          if (host) {
+            gp.set('host', host);
+            const sp = (_serverByVal(_envState.remoteServerKey || host) || {}).port;
+            if (sp) gp.set('ssh_port', sp);
+          }
+          const gr = await _fetchHwfitWithTimeout('/api/cookbook/gpus' + (gp.toString() ? '?' + gp : ''), { credentials: 'same-origin' }, 10000);
+          const gd = gr.ok ? await gr.json() : null;
+          const g0 = (gd && Array.isArray(gd.gpus) ? gd.gpus : []).find(g => isNvidiaUnifiedGpu(g, system));
+          const fit = g0 ? sparkGpuMemoryUtilization(g0.total_mb, g0.free_mb) : null;
+          if (fit && fit.util) {
+            gpuUtil = fit.util.toFixed(2);
+            uiModule.showToast(`GPU memory utilization ${gpuUtil}: ${fit.reason}`, 6000);
+          } else if (fit && fit.insufficient) {
+            uiModule.showToast(`Low free memory on this unified-memory GPU: ${fit.reason}`, 9000);
+          }
+        } catch {
+          // Probe unavailable: keep the static default and let vLLM report.
+        }
+      }
 
       // Build serve command
       let cmd = '';
@@ -1976,7 +1998,8 @@ export function _expandModelRow(row, modelData) {
         cmd += ` --max-model-len ${maxCtx}`;
         cmd += ` --gpu-memory-utilization ${gpuUtil}`;
         cmd += ' --dtype auto';
-        cmd += ' --enforce-eager';
+        if (!isNvidiaUnifiedGpu(null, system) || SPARK_DEFAULTS.quickRunEnforceEager) cmd += ' --enforce-eager';
+        if (isNvidiaUnifiedGpu(null, system) && SPARK_DEFAULTS.kvCacheDtype) cmd += ` --kv-cache-dtype ${SPARK_DEFAULTS.kvCacheDtype}`;
         cmd += ' --trust-remote-code';
         cmd += ` --enable-auto-tool-choice --tool-call-parser ${parser}`;
       }

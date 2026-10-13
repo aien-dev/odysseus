@@ -17,6 +17,7 @@ import {
 import { openCookbookDependencies } from './cookbook-diagnosis.js';
 import { _hwfitCache } from './cookbook-hwfit.js';
 import { topPortalZ } from './toolWindowZOrder.js';
+import { SPARK_DEFAULTS, isNvidiaUnifiedGpu, sparkGpuMemoryUtilization } from './cookbookSparkDefaults.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -1635,7 +1636,7 @@ function _rerenderCachedModels() {
       // GPU "auto" field removed — the GPU button strip below already
       // writes data-field="gpus" (the canonical comma-separated device
       // list) and the command builders now read from that single source.
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', _isMiniMaxMSeries ? '0.95' : '0.90'))}" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" data-auto-gpu-mem="${(ss.gpu_mem === undefined || ['0.90', '0.95'].includes(String(ss.gpu_mem))) ? '1' : '0'}" value="${esc(sv('gpu_mem', _isMiniMaxMSeries ? '0.95' : '0.90'))}" /><span class="hwfit-auto-gpumem-note"></span></label>`;
       panelHtml += `</div>`;
       // ── Advanced (collapsed by default) ──
       // Everything below the fold is tuning users only touch occasionally:
@@ -3011,6 +3012,35 @@ function _rerenderCachedModels() {
           }, 0);
         };
 
+        // NVIDIA unified-memory (DGX Spark / GB10): size --gpu-memory-utilization
+        // from the live free memory the probe reports, so a launch does not fail
+        // just because another process holds memory. A value the user typed
+        // (data-auto-gpu-mem="0") is never overwritten.
+        const _gpuMemEl = panel.querySelector('[data-field="gpu_mem"]');
+        const _gpuMemNote = panel.querySelector('.hwfit-auto-gpumem-note');
+        if (_gpuMemEl) _gpuMemEl.addEventListener('input', () => { _gpuMemEl.dataset.autoGpuMem = '0'; if (_gpuMemNote) _gpuMemNote.textContent = ''; });
+        const _applySparkGpuMem = (data) => {
+          if (!_gpuMemEl || _gpuMemEl.dataset.autoGpuMem === '0') return;
+          const backend = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
+          if (backend !== 'vllm' && backend !== 'sglang') return;
+          const picked = (panel.querySelector('[data-field="gpus"]')?.value || '').split(',').map(x => parseInt(x.trim(), 10)).filter(Number.isFinite);
+          const gpu = (picked.length ? panel._gpuProbe.byIdx.get(picked[0]) : null) || panel._gpuProbe.byIdx.get(0);
+          if (!gpu || !isNvidiaUnifiedGpu(gpu, _hwfitCache?.system)) return;
+          const fit = sparkGpuMemoryUtilization(gpu.total_mb, gpu.free_mb);
+          if (!fit) return;
+          if (_gpuMemNote) {
+            _gpuMemNote.textContent = fit.util ? `Auto ${fit.util.toFixed(2)} · ${fit.reason}` : fit.reason;
+            _gpuMemNote.title = `Computed from live free memory minus headroom (at least ${SPARK_DEFAULTS.headroomMinGiB} GiB or ${Math.round(SPARK_DEFAULTS.headroomFraction * 100)}%), so util x total fits what is free now. Type a value to override.`;
+          }
+          if (fit.util) {
+            const next = fit.util.toFixed(2);
+            if (_gpuMemEl.value !== next) {
+              _gpuMemEl.value = next;
+              _gpuMemEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        };
+
         const _runProbe = async (silent = false) => {
           _closeProbePopup();
           const hostEl = panel.querySelector('[data-field="host"]');
@@ -3033,6 +3063,7 @@ function _rerenderCachedModels() {
           }
           panel._gpuProbe.byIdx = new Map(data.gpus.map(g => [g.index, g]));
           panel._gpuProbe.host = remoteHost;
+          try { _applySparkGpuMem(data); } catch (_) {}
           // If the probe found more GPUs than the panel originally
           // rendered (e.g. host switched from a 1-iGPU local box to an
           // 8-GPU remote), append buttons for the missing indexes so the

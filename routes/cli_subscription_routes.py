@@ -6,6 +6,7 @@ never touches the CLIs' token files; login state comes from each CLI's own
 status command (see ``src/cli_subscription.py``).
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -91,12 +92,10 @@ def setup_cli_subscription_routes() -> APIRouter:
             }
         finally:
             db.close()
-        out = []
-        for slug in cli_subscription.VENDORS:
-            info = await cli_subscription.probe_vendor(slug)
+        out = list(await asyncio.gather(*(cli_subscription.probe_vendor(slug) for slug in cli_subscription.VENDORS)))
+        for info in out:
             info["connected"] = info["base_url"] in connected
             info["endpoint_id"] = connected.get(info["base_url"])
-            out.append(info)
         return {"vendors": out}
 
     @router.post("/{vendor}/connect")

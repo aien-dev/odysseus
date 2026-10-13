@@ -21,11 +21,11 @@ export function cliVendorState(v) {
 }
 
 const _TONE_COLOR = {
-  ok: 'var(--success, #3fb950)',
-  ready: 'var(--accent)',
-  warn: 'var(--warning, #d29922)',
-  off: 'var(--muted, #888)',
-  blocked: 'var(--error, #f85149)',
+  ok: 'var(--green)',
+  ready: 'var(--fg)',
+  warn: 'var(--warn)',
+  off: 'var(--border)',
+  blocked: 'var(--red)',
 };
 
 export function renderCliSubscriptionRows(vendors) {

@@ -499,3 +499,14 @@ def test_bridge_url_is_recognised_with_chat_route_appended():
     assert _detect_provider("http://cli-bridge.invalid/codex-cli/chat/completions") == "cli-subscription"
     assert vendor_for_url("http://cli-bridge.invalid/claude-code/other") is None
     assert vendor_for_url("http://cli-bridge.invalid/chat/completions") is None
+
+
+def test_bridge_routes_are_not_cost_tracked():
+    """Subscription use must not show per-token dollar costs in chat metrics."""
+    from src.endpoint_resolver import endpoint_cost_tracked
+    from src.model_pricing import estimate_cost_usd
+
+    url = "http://cli-bridge.invalid/grok-cli/chat/completions"
+    assert endpoint_cost_tracked(url) is False
+    assert estimate_cost_usd("grok-4.7", 3000, 10, url) is None
+    assert endpoint_cost_tracked("https://api.x.ai/v1") is True

@@ -1252,6 +1252,8 @@ export function isSubscriptionEndpoint(url) {
   try {
     const parsed = new URL(url);
     const path = parsed.pathname.replace(/\/+$/, '');
+    // Local vendor CLI bridges (src/cli_subscription.py) run on a subscription too.
+    if (parsed.protocol === 'http:' && parsed.hostname === 'cli-bridge.invalid') return true;
     return parsed.hostname === 'chatgpt.com'
       && (path === '/backend-api/codex' || path.startsWith('/backend-api/codex/'));
   } catch (_e) {

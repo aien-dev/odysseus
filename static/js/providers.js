@@ -126,6 +126,13 @@ const _ENDPOINT_LABELS = [
   [/(^|\.)x\.ai$/i, "xAI"],
 ];
 
+const _CLI_BRIDGE_LABELS = {
+  "claude-code": "Claude (subscription)",
+  "codex-cli": "Codex (subscription)",
+  "grok-cli": "Grok (subscription)",
+  "antigravity": "Gemini (Antigravity subscription)",
+};
+
 /**
  * Friendly label for the endpoint that served a model, from its URL.
  * Returns "Local" for loopback/LAN hosts, a known provider name when matched,
@@ -143,6 +150,11 @@ export function providerLabel(endpointUrl) {
     host = colonIdx >= 0 ? stripped.slice(0, colonIdx) : stripped;
   }
   if (!host) return null;
+  // Local CLI subscription bridges: reserved host, vendor named by the path.
+  if (host === "cli-bridge.invalid") {
+    const slug = endpointUrl.split("cli-bridge.invalid/")[1]?.split(/[/?#]/)[0];
+    return _CLI_BRIDGE_LABELS[slug] || "CLI subscription";
+  }
   const isLoopback = /^(localhost|127\.|0\.0\.0\.0|::1)/.test(host);
   if (isLoopback) {
     // Don't name the serving tool from the port — it isn't authoritative

@@ -151,6 +151,9 @@ def is_subscription_endpoint(url: str | None) -> bool:
     """ChatGPT Codex subscription endpoints are paid via subscription, not per-token."""
     if not url:
         return False
+    from src.cli_subscription import is_cli_subscription_base
+    if is_cli_subscription_base(url):
+        return True
     try:
         parts = urlsplit(str(url))
         path = parts.path.rstrip("/")

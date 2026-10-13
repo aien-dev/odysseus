@@ -1093,6 +1093,9 @@ def _detect_provider(url: str) -> str:
         return "kimi-code"
     if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
         return "moonshot"
+    from src.cli_subscription import is_cli_subscription_base
+    if is_cli_subscription_base(url):
+        return "cli-subscription"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
@@ -1330,6 +1333,8 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "groq.com"): return "Groq"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
+    from src.cli_subscription import is_cli_subscription_base, provider_label as _cli_label
+    if is_cli_subscription_base(url): return _cli_label(url)
     from src.copilot import is_copilot_base
     if is_copilot_base(url): return "GitHub Copilot"
     if _host_match(url, "featherless.ai"): return "Featherless.ai"
@@ -2268,6 +2273,35 @@ def normalize_model_id(
             return a
     return None
 
+def _run_cli_subscription_sync(url: str, model: str, messages: List[Dict], timeout) -> str:
+    import concurrent.futures
+    from src.cli_subscription import stream_cli_completion
+
+    async def _collect() -> str:
+        parts: List[str] = []
+        async for chunk in stream_cli_completion(url, model, messages, timeout=timeout):
+            event_is_error = False
+            for line in str(chunk).splitlines():
+                if line.startswith("event:"):
+                    event_is_error = line[6:].strip() == "error"
+                elif line.startswith("data:"):
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if event_is_error:
+                        raise HTTPException(int(data.get("status") or 502), data.get("text") or "CLI subscription request failed")
+                    if isinstance(data.get("delta"), str):
+                        parts.append(data["delta"])
+        return "".join(parts)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_collect())).result()
+
+
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
@@ -2309,6 +2343,15 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
+
+    if provider == "cli-subscription":
+        # The ChatGPT subscription has no sync path (it falls through to the
+        # chat-completions shape). The CLI bridge is async-only, so run the
+        # async generator to completion on a private loop in a worker thread,
+        # which is safe whether or not the caller already has a running loop.
+        text = _run_cli_subscription_sync(url, model, messages_copy, timeout)
+        _set_cached_response(cache_key, text)
+        return text
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
@@ -2631,7 +2674,7 @@ async def llm_call_async(
             return cached_response, (_get_cached_response_model(cache_key) or model)
         return cached_response
 
-    if provider == "chatgpt-subscription":
+    if provider in ("chatgpt-subscription", "cli-subscription"):
         # ChatGPT/Codex requires streamed Responses requests even for callers
         # that want a plain string (auto-title, memory extraction, etc.).
         # Reuse stream_llm's validated Codex SSE path and collect deltas.
@@ -2677,7 +2720,7 @@ async def llm_call_async(
                     continue
                 if event_is_error or data.get("error") or (data.get("status") and data.get("text")):
                     status = int(data.get("status") or 502)
-                    text = data.get("text") or data.get("error") or "ChatGPT Subscription request failed"
+                    text = data.get("text") or data.get("error") or "Subscription request failed"
                     error_type = (
                         _FallbackIneligibleHTTPException
                         if data.get("fallback_eligible") is False
@@ -2894,6 +2937,8 @@ def _stream_target_url(url: str) -> str:
         return _normalize_ollama_url(url)
     if provider == "chatgpt-subscription":
         return _normalize_chatgpt_subscription_url(url)
+    if provider == "cli-subscription":
+        return url
     return _normalize_openai_chat_url(url)
 
 
@@ -2954,6 +2999,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+
+    if provider == "cli-subscription":
+        # Official vendor CLI as a plain text model. `tools` is deliberately
+        # never forwarded: Odysseus is the only agent (text protocol in the prompt).
+        from src.cli_subscription import stream_cli_completion
+        async for chunk in stream_cli_completion(
+            url, model, messages_copy, timeout=timeout, reasoning_effort=reasoning_effort,
+        ):
+            yield chunk
+        return
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)

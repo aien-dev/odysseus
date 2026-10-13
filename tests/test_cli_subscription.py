@@ -482,3 +482,20 @@ def test_connect_refuses_blocked_unknown_and_signed_out(client, monkeypatch):
     monkeypatch.setattr(cs, "probe_vendor", signed_out)
     assert client.post("/api/cli-subscription/codex-cli/connect").status_code == 409
     assert client.Session().query(ModelEndpoint).count() == 0
+
+
+def test_bridge_url_is_recognised_with_chat_route_appended():
+    """Regression: the chat path appends /chat/completions to the base URL.
+
+    Before the fix the bridge was not recognised on that URL, so chats fell
+    through to a real HTTP request to the reserved host and failed with
+    "Upstream http://cli-bridge.invalid unreachable".
+    """
+    from src.cli_subscription import vendor_for_url
+    from src.llm_core import _detect_provider
+
+    assert vendor_for_url("http://cli-bridge.invalid/claude-code/chat/completions") == "claude-code"
+    assert vendor_for_url("http://cli-bridge.invalid/grok-cli/models") == "grok-cli"
+    assert _detect_provider("http://cli-bridge.invalid/codex-cli/chat/completions") == "cli-subscription"
+    assert vendor_for_url("http://cli-bridge.invalid/claude-code/other") is None
+    assert vendor_for_url("http://cli-bridge.invalid/chat/completions") is None

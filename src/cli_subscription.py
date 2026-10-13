@@ -114,6 +114,9 @@ VENDORS: Dict[str, Vendor] = {
 }
 
 
+_BRIDGE_ROUTE_SUFFIXES = ("chat/completions", "models")
+
+
 def vendor_for_url(url: Optional[str]) -> Optional[str]:
     """Vendor slug for an exact bridge URL (exact host + known path), else None."""
     if not url:
@@ -127,8 +130,14 @@ def vendor_for_url(url: Optional[str]) -> Optional[str]:
         return None
     if parts.query or parts.fragment or parts.username or parts.password:
         return None
-    slug = parts.path.strip("/")
-    return slug if slug in VENDORS else None
+    # The chat path appends the OpenAI-style route to the base, so accept the
+    # bare base plus exactly those suffixes and nothing else.
+    path = parts.path.strip("/")
+    for suffix in _BRIDGE_ROUTE_SUFFIXES:
+        if suffix and path.endswith("/" + suffix):
+            path = path[: -len(suffix) - 1]
+            break
+    return path if path in VENDORS else None
 
 
 def is_cli_subscription_base(url: Optional[str]) -> bool:

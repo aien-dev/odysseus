@@ -1681,3 +1681,12 @@ def test_native_tool_rejection_rebuilds_and_retries_same_candidate(monkeypatch):
     }
     assert not any(chunk.startswith("event: error") for chunk in chunks)
     assert any("```bash" in chunk for chunk in chunks)
+
+
+def test_plain_text_server_tool_calling_rejection_is_recognized():
+    chunk = (
+        'event: error\ndata: {"status": 400, "text": "own30b-bridge returned '
+        'HTTP 400: tool calling is not supported by this server (v1 is plain text)"}\n\n'
+    )
+
+    assert llm_core._native_tool_transport_rejected(chunk)

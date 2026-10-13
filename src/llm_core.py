@@ -4016,6 +4016,7 @@ def _native_tool_transport_rejected(err_chunk: Optional[str]) -> bool:
         "tool choice is not supported",
         "tool_choice is not supported",
         "tools are not supported",
+        "tool calling is not supported",
         "function calling is not supported",
         "function_calling is not supported",
     )

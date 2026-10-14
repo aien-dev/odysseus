@@ -702,7 +702,7 @@ def test_active_client_skill_lands_in_untrusted_prompt_message(monkeypatch):
         and "Source: skills" in str(message.get("content") or "")
     ]
     assert skill_messages
-    skill_text = skill_messages[0]["content"]
+    skill_text = "\n".join(m["content"] for m in skill_messages)
     assert "active_skills=tdd" not in system_text
     assert "### tdd" in skill_text
     assert "write a failing test" in skill_text

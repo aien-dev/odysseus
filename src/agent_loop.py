@@ -8238,32 +8238,59 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         parts.extend(_domain_rules_for_tools(included))
         return "\n\n".join(parts)
 
-    parts = [_AGENT_PREAMBLE]
+    # Prefix-cache layout. Local OpenAI-compatible servers reuse their KV cache
+    # only up to the first byte that differs between two requests, so the
+    # prompt is laid out as:
+    #   1. STABLE block: preamble, the always-available tool catalogue (fixed
+    #      registry order), the base rules, and the domain rules those tools need.
+    #   2. DYNAMIC tail: sections for the tools retrieval added for THIS query,
+    #      plus any extra domain rules they need.
+    # Nothing that varies per query may appear in block 1.
+    stable_names, dynamic_names = _split_stable_tool_names(included)
+    stable_parts = [_AGENT_PREAMBLE]
+    stable_parts.extend(_tool_catalogue_parts(stable_names))
+    stable_parts.append(_AGENT_RULES)
+    stable_rules = _domain_rules_for_tools(stable_names)
+    stable_parts.extend(stable_rules)
 
-    # Collect full-block tool sections (with examples)
+    dynamic_parts = _tool_catalogue_parts(
+        dynamic_names, heading="## Tools added for this request"
+    )
+    dynamic_parts.extend(
+        rule for rule in _domain_rules_for_tools(included) if rule not in stable_rules
+    )
+    return "\n\n".join(stable_parts + dynamic_parts)
+
+
+def _split_stable_tool_names(included: set) -> tuple[set, set]:
+    """Split a tool set into the always-available core and the per-query rest."""
+    from src.tool_index import ALWAYS_AVAILABLE
+
+    stable = {name for name in included if name in ALWAYS_AVAILABLE}
+    return stable, set(included) - stable
+
+
+def _tool_catalogue_parts(names: set, heading: str = "") -> list[str]:
+    """Render tool sections for ``names`` in fixed TOOL_SECTIONS registry order."""
     full_blocks = []
-    # Collect one-liner tool sections
     one_liners = []
-
-    for name, _default_section in TOOL_SECTIONS.items():
-        if name not in included:
+    for name, default_section in TOOL_SECTIONS.items():
+        if name not in names:
             continue
-        section = _section_text(name, _default_section)
+        section = _section_text(name, default_section)
         if section.startswith("```") or section.startswith("-"):
             if section.startswith("- "):
                 one_liners.append(section)
             else:
                 full_blocks.append(section)
-
+    parts = []
     if full_blocks:
         parts.append("\n\n".join(full_blocks))
-
     if one_liners:
         parts.append("## Additional tools\n" + "\n".join(one_liners))
-
-    parts.append(_AGENT_RULES)
-    parts.extend(_domain_rules_for_tools(included))
-    return "\n\n".join(parts)
+    if heading and parts:
+        parts.insert(0, heading)
+    return parts
 
 
 # Legacy: full prompt with all tools (fallback when RAG unavailable)
@@ -14059,11 +14086,22 @@ def _strip_agent_injected_messages(messages: List[Dict]) -> List[Dict]:
 
 
 def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]:
-    """Attach a route-independent directive to the generated agent prompt."""
+    """Attach a route-independent directive to the generated agent prompt.
+
+    Directives are per-request. They go at the END of the generated prompt (after
+    the byte-stable tool catalogue and rules) so a local server's KV prefix cache
+    still covers everything before them. Among directives, the newest comes
+    first, matching the old prepend precedence.
+    """
 
     for message in messages:
         if message.get("_agent_injected") in {"prompt", "merged_prompt"}:
-            message["content"] = directive + "\n\n" + (message.get("content") or "")
+            content = message.get("content") or ""
+            zone = message.get("_agent_directive_zone")
+            if not isinstance(zone, int) or not 0 <= zone <= len(content):
+                zone = len(content)
+                message["_agent_directive_zone"] = zone
+            message["content"] = content[:zone] + "\n\n" + directive + content[zone:]
             return messages
     messages.insert(0, {
         "role": "system",
@@ -14461,19 +14499,20 @@ def _build_system_prompt(
     if suppress_local_context:
         active_document = None
 
-    runtime_messages = []
+    # Prefix-cache layout: container facts and AGENTS.md are byte-stable for a
+    # session, so they sit right after the system prompt (before history). The
+    # client runtime context can change per turn, so it rides late with the
+    # other dynamic blocks, just before the user's message.
+    _stable_context_messages = []
+    _client_context_message = None
     if not suppress_local_context:
         backend_context = _backend_runtime_context_message()
         if backend_context:
-            runtime_messages.append(backend_context)
-        client_context = _client_runtime_context_message(client_runtime_context)
-        if client_context:
-            runtime_messages.append(client_context)
+            _stable_context_messages.append(backend_context)
+        _client_context_message = _client_runtime_context_message(client_runtime_context)
         agents_context = _workspace_agents_context_message(workspace)
         if agents_context:
-            runtime_messages.append(agents_context)
-    if runtime_messages:
-        messages = list(messages or []) + runtime_messages
+            _stable_context_messages.append(agents_context)
 
     # The TUI may explicitly activate a skill for this turn. Keep its body in
     # the untrusted context message, but make its declared toolsets available
@@ -14580,6 +14619,7 @@ def _build_system_prompt(
     # the trusted system role. Bound up front so the insert block below can
     # always check it.
     _skills_message = None
+    _skill_index_message = None
     _email_style_message = None
     _recent_email_context_message = None
     _integ_message = None
@@ -15055,13 +15095,18 @@ def _build_system_prompt(
                 # Also include the skill INDEX (one-line-per-skill catalogue
                 # from _build_base_prompt) — its name + description fields
                 # are equally user-editable.
-                if relevant_skills or _skill_index_block:
-                    _skills_text = "\n".join(lines)
-                    if _skill_index_block:
-                        _skills_text = _skill_index_block + "\n\n" + _skills_text
+                # The index is byte-stable across turns, so it travels in its own
+                # message placed right after the system prompt (prefix-cache
+                # friendly); only the per-query matched skills ride late.
+                if _skill_index_block:
+                    _skill_index_message = untrusted_context_message(
+                        "skills",
+                        _skill_index_block.strip(),
+                    )
+                if relevant_skills:
                     _skills_message = untrusted_context_message(
                         "skills",
-                        _skills_text,
+                        "\n".join(lines),
                     )
                 else:
                     _skills_message = None
@@ -15141,6 +15186,25 @@ def _build_system_prompt(
         else:
             merged.append(msg)
 
+    # Byte-stable context (container facts, AGENTS.md, integrations, skill index)
+    # goes right after the leading system message(s), BEFORE the conversation
+    # history, so a local server's KV prefix cache covers it on every turn.
+    # The conversation history follows, then the per-request dynamic blocks,
+    # then the user's message.
+    _stable_early = [
+        *_stable_context_messages,
+        *([_integ_message] if _integ_message else []),
+        *([_skill_index_message] if _skill_index_message else []),
+    ]
+    if _stable_early:
+        for _early in (_integ_message, _skill_index_message):
+            if _early:
+                _early["_agent_injected"] = "context"
+        _lead = 0
+        while _lead < len(merged) and merged[_lead].get("role") == "system":
+            _lead += 1
+        merged[_lead:_lead] = _stable_early
+
     # Insert the document message right before the last user message so it's
     # close to the user's request and survives context trimming independently.
     # Same treatment for the matched-skills block — user-editable skill
@@ -15155,7 +15219,6 @@ def _build_system_prompt(
         _email_message,
         _email_style_message,
         _recent_email_context_message,
-        _integ_message,
         _mcp_desc_message,
         _skills_message,
         _datetime_message,
@@ -15174,14 +15237,14 @@ def _build_system_prompt(
     if _recent_email_context_message:
         merged.insert(last_user_idx, _recent_email_context_message)
         last_user_idx += 1
-    if _integ_message:
-        merged.insert(last_user_idx, _integ_message)
-        last_user_idx += 1
     if _mcp_desc_message:
         merged.insert(last_user_idx, _mcp_desc_message)
         last_user_idx += 1
     if _skills_message:
         merged.insert(last_user_idx, _skills_message)
+        last_user_idx += 1
+    if _client_context_message:
+        merged.insert(last_user_idx, _client_context_message)
         last_user_idx += 1
     if _datetime_message:
         merged.insert(last_user_idx, _datetime_message)

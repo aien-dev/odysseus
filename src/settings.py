@@ -171,6 +171,11 @@ DEFAULT_SETTINGS = {
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,
+    # Ahead-of-Enter prefill: while the user composes (or a tool runs) the
+    # backend posts the in-progress prompt to a local model server's
+    # /v1/aien/prefill so its KV cache is warm when the real request arrives.
+    # Off by default; servers without the endpoint are skipped silently.
+    "aien_prefill_enabled": False,
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,

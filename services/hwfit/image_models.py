@@ -357,9 +357,10 @@ def _is_apple_image_system(system: dict[str, Any]) -> bool:
     gpu_name = str(system.get("gpu_name") or "").lower()
     cpu_name = str(system.get("cpu_name") or "").lower()
     platform = str(system.get("platform") or "").lower()
+    # `unified_memory` is deliberately not an Apple signal: NVIDIA GB10 / DGX
+    # Spark and AMD APUs share system memory too and run CUDA/ROCm, not MLX.
     return (
-        bool(system.get("unified_memory"))
-        or backend in {"metal", "mps", "apple"}
+        backend in {"metal", "mps", "apple"}
         or "apple" in gpu_name
         or "apple" in cpu_name
         or platform == "darwin"

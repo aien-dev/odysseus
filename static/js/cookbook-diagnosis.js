@@ -23,6 +23,7 @@ import {
   // browser loads it once. See cookbook-hwfit.js.
 } from './cookbook.js';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
+import { SPARK_DEFAULTS } from './cookbookSparkDefaults.js';
 
 // Tiny HTML-escape — keeps the file standalone instead of leaning on a
 // shared helper that may not be exported from this module's import surface.
@@ -294,6 +295,16 @@ export const ERROR_PATTERNS = [
     fixes: [
       { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
       { label: 'Copy check command', action: () => _copyText('curl http://127.0.0.1:PORT/v1/models') },
+    ],
+  },
+  {
+    pattern: /Free memory on device.*less than desired GPU memory utilization|less than desired GPU memory utilization/i,
+    message: 'Not enough free GPU memory at startup.',
+    suggestion: 'On a unified-memory GPU (GB10 / DGX Spark) the Linux page cache counts against CUDA free memory, so dropping it can free many GiB. Otherwise stop the other process holding memory, or lower GPU mem.',
+    fixes: [
+      { label: 'Drop page cache (sudo)', action: (panel) => _runQuickCmd(panel, SPARK_DEFAULTS.dropCacheCommand.replace('sudo tee', 'sudo -n tee')) },
+      { label: 'Copy drop-cache command', action: () => _copyText(SPARK_DEFAULTS.dropCacheCommand) },
+      { label: 'Retry with GPU mem 0.60', action: (panel) => _serveAutoRetryReplace(panel, '--gpu-memory-utilization', '0.60') },
     ],
   },
   {

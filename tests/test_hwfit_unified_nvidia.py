@@ -20,6 +20,22 @@ def _local(monkeypatch):
     monkeypatch.setattr(hardware, "_remote_host", None)
 
 
+def test_gb10_image_ranking_is_not_treated_as_apple():
+    """GB10 reports unified_memory=True but is CUDA, not Apple: the image-model
+    list must not be narrowed to MLX/Apple-only models."""
+    from services.hwfit import image_models
+
+    gb10 = {
+        "has_gpu": True, "gpu_name": "NVIDIA GB10", "gpu_vram_gb": 121.0,
+        "backend": "cuda", "unified_memory": True, "cpu_name": "NVIDIA Grace",
+        "platform": "linux",
+    }
+    assert image_models._is_apple_image_system(gb10) is False
+    assert image_models._is_apple_image_system(
+        {"backend": "metal", "unified_memory": True, "gpu_name": "Apple M3"}
+    ) is True
+
+
 def test_gb10_unified_memory_detected_not_dropped(monkeypatch):
     # Real GB10 nvidia-smi --query-gpu=memory.total,name output: memory is N/A.
     monkeypatch.setattr(hardware, "_run", lambda cmd: "[N/A], NVIDIA GB10")

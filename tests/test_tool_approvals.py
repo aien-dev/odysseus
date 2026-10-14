@@ -500,3 +500,15 @@ async def test_dispatcher_revalidates_sealed_workspace(monkeypatch, tmp_path):
 
     assert result["blocked"] is True
     assert result["policy"] == "exact_tool_approval"
+
+
+def test_bash_approval_refused_up_front_when_no_launch_scope_is_sealed():
+    """No workspace means no sealed launch scope. Offering an approval card the
+    user can click but execution must reject ("no sealed process/job identity")
+    is a dead end, so creation fails with the real reason instead."""
+    from src.agent_runtime.authority import RequestAuthority, OperationGrant
+    store = ToolApprovalStore()
+    authority = RequestAuthority("no-workspace-request", "alice", "session-1", "",
+                                 (OperationGrant("bash"),), launch_scopes=())
+    with pytest.raises(ValueError, match="workspace"):
+        _pending(store, request_authority=authority)

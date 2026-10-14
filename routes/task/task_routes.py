@@ -619,6 +619,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         """Persist an in-app toast so Settings can show notification history."""
         user = _owner(request)
         if not user:
+            from src.owner_identity import auth_disabled
+            if auth_disabled():
+                # No user to file the toast under. A 401 here makes the global
+                # fetch wrapper (static/app.js) redirect to /login and reload the
+                # page, discarding state such as a just-picked model.
+                return {"ok": True, "stored": False}
             raise HTTPException(401, "Authentication required")
         body = await request.json()
         message = str(body.get("body") or "").strip()[:2000]

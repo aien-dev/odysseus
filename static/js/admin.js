@@ -4,6 +4,7 @@
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { providerLogo, providerLogoFromUrl } from './providers.js';
+import { loadCliSubscriptions } from './cliSubscriptions.js';
 import { sortModelObjects } from './modelSort.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
 import {
@@ -4110,7 +4111,8 @@ function initAll() {
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
-    () => settingsModule.initIntegrations()
+    () => settingsModule.initIntegrations(),
+    initCliSubscriptions,
   ];
   for (const fn of inits) {
     try { fn(); } catch (e) { console.error('Admin init error in', fn.name || 'anonymous', e); }
@@ -4119,9 +4121,14 @@ function initAll() {
   refreshAll();
 }
 
+function initCliSubscriptions() {
+  el('adm-cliSubRefreshBtn')?.addEventListener('click', () => loadCliSubscriptions({ onChange: loadEndpoints }));
+}
+
 function refreshAll() {
   loadUsers();
   loadEndpoints();
+  loadCliSubscriptions({ onChange: loadEndpoints });
   loadBuiltinTools();
   loadMcpServers();
   loadTokens();

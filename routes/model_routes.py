@@ -1023,6 +1023,10 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         return []
     if provider == "featherless" or _host_match(base, "featherless.ai"):
         return []
+    if provider == "cli-subscription":
+        # Local CLI bridge: no network host to probe; the models come from the CLI at connect time.
+        from src.cli_subscription import VENDORS, vendor_for_url
+        return list(VENDORS[vendor_for_url(base)].default_models)
     if _is_google_api_base(base):
         try:
             models = _probe_google_models(base, api_key, timeout=timeout)

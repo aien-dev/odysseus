@@ -437,6 +437,14 @@ class ToolApprovalStore:
                     document_digest = owned_operation.document_digest
         except (ValueError, TypeError, OSError, RuntimeError, AttributeError):
             pass  # Unresolved proposals are never reconstructed at execution.
+        if (request_authority is not None and process_operation is None and backend_operation is not None
+                and isinstance(backend_operation.resource, NativeBackendResource)
+                and backend_operation.resource.tool_id in {"bash", "python"}
+                and request_authority.permits(operation)):
+            # Execution rejects an unsealed launch, so an approval card would be a dead end.
+            from src.agent_runtime.resources import ResourceIdentityError
+            raise ResourceIdentityError(
+                f"{tool_name} needs a workspace folder before it can run. Choose a workspace for this chat, then ask again.")
         if tool_name in NATIVE_FILESYSTEM_TOOLS and backend_operation is not None and isinstance(backend_operation.resource, NativeBackendResource):
             try:
                 roots = request_authority.resource_roots if request_authority is not None else ()

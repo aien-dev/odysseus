@@ -45,6 +45,9 @@ def endpoint_cost_tracked(url: str, endpoint_kind: Optional[str] = None) -> bool
         return False
     if not host:
         return False
+    from src.cli_subscription import is_cli_subscription_base
+    if is_cli_subscription_base(url):
+        return False
     if host == "chatgpt.com" and (
         path == "/backend-api/codex" or path.startswith("/backend-api/codex/")
     ):
